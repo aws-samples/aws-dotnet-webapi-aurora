@@ -1,0 +1,293 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy a .NET WebApi on AWS Fargate that talks to Aurora, hosted in a private subnet/FARGATE accessible via a public load balancer.
+Mappings:
+  AWSInstanceType2Arch:
+    t3.micro:
+      Arch: HVM64
+    t3.small:
+      Arch: HVM64
+    t3.medium:
+      Arch: HVM64    
+    t3.large:
+      Arch: HVM64
+    m3.small:
+      Arch: HVM64      
+  AWSRegionArch2AMI:
+    us-east-1:
+      HVM64: ami-0b69ea66ff7391e80   
+    us-east-2:
+      HVM64: ami-00c03f7f7f2ec15c3
+    us-west-1:
+      HVM64: ami-0245d318c6788de52
+    us-west-2:
+      HVM64: ami-04b762b4289fba92b
+    ap-south-1:
+      HVM64: ami-0cb0e70f44e1a4bb5
+      
+Parameters:
+  StackName:
+    Type: String
+    Default: net-core-stack
+    Description: The name of the parent stack that spun up infrastructure already
+  AppStackName:
+    Description: Service stack for net-core-task
+    Type: String
+    Default: net-core-stack-service   
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: my-east1-keypair    
+  InstanceType:
+      Description: RDS DBTable Instance type
+      Type: String
+      Default: t3.large
+      AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+      - m3.small
+
+Resources:
+
+  #Inline Lambda function to create the table
+  CreateTableScriptLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AppStackName}-createtablelambda
+      Handler: index.handler
+      Runtime: python3.6
+      Role: !GetAtt LambdaBasicExecutionRole.Arn
+      Environment:
+        Variables:
+          SOURCE_S3_BUCKET: 
+            Fn::ImportValue:
+              !Join [':', [!Ref 'StackName', 'CodeS3Bucket']]  
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import boto3
+
+          def handler(event, context):
+              print("lambda - table creator - entered")
+              s3 = boto3.resource('s3')
+              ssm_client = boto3.client('ssm')
+              ssm_db_name = ssm_client.get_parameter(Name='/Database/Config/DBName', WithDecryption=False)['Parameter']['Value']
+              ssm_db_user = ssm_client.get_parameter(Name='/Database/Config/DBUser', WithDecryption=False)['Parameter']['Value']
+              ssm_db_password = ssm_client.get_parameter(Name='/Database/Config/DBPassword', WithDecryption=False)['Parameter']['Value']
+              ssm_db_host = ssm_client.get_parameter(Name='/Database/Config/DBHost', WithDecryption=False)['Parameter']['Value']
+                  
+              script_string = "let mysql = require('mysql');\nlet connection = mysql.createConnection({\n  host     : '<<RDS_EP>>',\n  user     : '<<RDS_UID>>',\n  password : '<<RDS_PWD>>',\n  database : '<<RDS_DBNAME>>'\n});\n \n// connect to the MySQL server\nconnection.connect(function(err) {\n  if (err) {\n    return console.error('error: ' + err.message);\n  }\n \n  let createTodos = `CREATE TABLE IF NOT EXISTS ToDos(\n                          id MEDIUMINT not null auto_increment,\n                          CreatedTime TIMESTAMP DEFAULT now(),\n                          Status VARCHAR(50),\n                          Task VARCHAR(50),\n                          primary key(id)\n                      )`;\n \n  connection.query(createTodos, function(err, results, fields) {\n    if (err) {\n      console.log(err.message);\n    }else{\n      console.log('table created successfully')\n    }\n  });\n \n  connection.end(function(err) {\n    if (err) {\n      return console.log(err.message);\n    }\n  });\n});"
+              
+              string = script_string.replace("<<RDS_EP>>", ssm_db_host)
+              string = string.replace("<<RDS_DBNAME>>", ssm_db_name)
+              string = string.replace("<<RDS_UID>>", ssm_db_user)
+              string = string.replace("<<RDS_PWD>>", ssm_db_password)
+
+              encoded_string = string.encode("utf-8")
+          
+              bucket_name = os.environ["SOURCE_S3_BUCKET"]
+              file_name = "mysql-create-table.js"
+              
+              s3.Bucket(bucket_name).put_object(Key=file_name, Body=encoded_string)
+              print("MySQL Script for table creation deployed in S3 bucket " + bucket_name + " successfully! ")
+              return "file-path: " + bucket_name + "/" + file_name
+          
+  LambdaBasicExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AppStackName}-create-table-lambda-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: !Sub ${AppStackName}-s3-file-create-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['cloudwatch:*', 'logs:*']
+                Resource: '*' 
+              - Effect: Allow
+                Action: ['ssm:*']
+                Resource: '*'                            
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  Fn::Join:
+                    - ''
+                    - - "arn:aws:s3:::"               
+                      - Fn::ImportValue:
+                          !Join [':', [!Ref 'StackName', 'CodeS3Bucket']]
+                      - "/*"
+
+  EC2RDSTableHandlerInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: CreateTableScriptLambda
+    Properties:
+      IamInstanceProfile:
+        Ref: EC2RDSTableHandlerIamInstanceProfile
+      ImageId:
+        Fn::FindInMap:
+        - AWSRegionArch2AMI
+        - Ref: AWS::Region
+        - Fn::FindInMap:
+          - AWSInstanceType2Arch
+          - Ref: InstanceType
+          - Arch
+      InstanceType:
+        Ref: InstanceType
+      KeyName:
+        Ref: KeyName
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash -x
+            echo "Retrieving env variables - bucket name - ${S3_BUCKET_NAME} - lambda name - ${LAMBDA_NAME} - region - ${REGION}" >> /home/ec2-user/STEP1 || exit 1
+
+            aws lambda invoke --function-name ${LAMBDA_NAME} {} --region ${REGION} || exit 1
+            echo "lambda_invoked_successfully_${LAMBDA_NAME}_${REGION}" >> /home/ec2-user/STEP2 || exit 1
+
+            mkdir /home/ec2-user/net-core && cd  /home/ec2-user/net-core && aws s3 cp s3://${S3_BUCKET_NAME}/ /home/ec2-user/net-core/ --recursive && curl --silent --location https://rpm.nodesource.com/setup_12.x | bash -  && yum -y install nodejs && npm install mysql && node mysql-create-table.js || exit 1
+            echo "executed node script for tables" >> /home/ec2-user/STEP7 
+          -
+            S3_BUCKET_NAME:
+              Fn::ImportValue:
+                Fn::Sub: "${StackName}:CodeS3Bucket"               
+            LAMBDA_NAME: !Sub ${AppStackName}-createtablelambda
+            REGION: !Ref AWS::Region
+
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          GroupSet:
+            - Fn::ImportValue:
+                !Join [':', [!Ref 'StackName', 'ECSSecurityGroup']]
+          SubnetId: 
+            Fn::ImportValue:
+              !Join [':', [!Ref 'StackName', 'PublicSubnet1']]  
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppStackName}-rds-table-creator-instance
+        - Key: SourceBucket
+          Value:
+            Fn::ImportValue:
+              !Join [':', [!Ref 'StackName', 'CodeS3Bucket']]            
+  
+  EC2RDSTableHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub ${AppStackName}-ec2-table-handler-awslogs
+      RetentionInDays: 30
+
+  EC2RDSTableHandlerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AppStackName}-ec2-table-handler-sg
+      GroupDescription: Enable HTTP access via SSH
+      VpcId: 
+        Fn::ImportValue:
+          !Join [':', [!Ref 'StackName', 'ApiVPC']]
+      GroupDescription: Enable HTTP access via SSH
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        CidrIp: '72.21.196.65/32'
+  
+  EC2RDSTableHandlerIamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${AppStackName}-ec2-rds-table-handler-instanceprofile
+      Path: "/"
+      Roles:
+      - Ref: EC2RDSTableHandlerRole
+  
+  EC2RDSTableHandlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AppStackName}-ec2-rds-table-handler-role
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonRDSFullAccess 
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess  
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/AWSLambdaFullAccess
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: EC2RDSTableHandlerPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: ecs:*
+            Resource: "*"   
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: EC2RDSTableHandlerInstance
+    Properties:
+      ServiceName: !Sub ${AppStackName}-todo-app-service
+      Cluster:
+        Fn::ImportValue:
+          !Join [':', [!Ref 'StackName', 'ClusterName']]
+      LaunchType: FARGATE
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - Fn::ImportValue:
+                !Join [':', [!Ref 'StackName', 'ECSSecurityGroup']]
+          Subnets:
+            - Fn::ImportValue:
+                !Join [':', [!Ref 'StackName', 'PublicSubnet1']]
+            - Fn::ImportValue:
+                !Join [':', [!Ref 'StackName', 'PublicSubnet2']]
+
+      TaskDefinition: 
+        Fn::ImportValue:
+          !Join [':', [!Ref 'StackName', 'ECSTaskDefinition']] 
+      LoadBalancers:
+        - ContainerName: web
+          ContainerPort: 80
+          TargetGroupArn:
+            Fn::ImportValue:
+              !Join [':', [!Ref 'StackName', 'TargetGroupName']]
+
+
+Outputs:
+  HealthCheckUrl:
+    Description: Healthcheck URL
+    Value: 
+       Fn::Join:
+        - ''
+        - - Fn::ImportValue:
+              !Join [':', [!Ref 'StackName', 'ExternalUrl']] 
+          - '/api/values'
+  WebApiUrl:
+    Description: WebApi URL
+    Value: 
+       Fn::Join:
+        - ''
+        - - Fn::ImportValue:
+              !Join [':', [!Ref 'StackName', 'ExternalUrl']] 
+          - '/api/todo'

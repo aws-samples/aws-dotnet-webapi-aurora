@@ -1,0 +1,796 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create AWS infrastructure to deploy .NET WebApi on AWS Fargate that talks to Aurora.
+Mappings:
+  SubnetConfig:
+    VPC:
+      CIDR: '10.0.0.0/16'
+    PublicOne:
+      CIDR: '10.0.0.0/24'
+    PublicTwo:
+      CIDR: '10.0.1.0/24'
+    PrivateOne:
+      CIDR: '10.0.2.0/24'
+    PrivateTwo:
+      CIDR: '10.0.3.0/24'
+Parameters:
+  ECSDeployEnv:
+    Type: String
+    Default: Dev
+    AllowedValues:
+    - Dev
+    - Test
+    - Prod
+  DBUser:
+    Type: String
+    Default: master
+  DBPassword:
+    Type: String
+    Default: netc0re123
+  DBName:
+    Type: String
+    Default: todo
+  AppStackName:
+    Description: An Application name that will be prefixed to resource names
+    Type: String
+    Default: net-core-stack    
+Resources:
+  ApiVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: 
+        !FindInMap ['SubnetConfig', 'VPC', 'CIDR']
+      Tags:
+        - Key: Name
+          Value: !Ref AppStackName     
+        - Key: Project
+          Value: .Net Core on AWS   
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: ApiVPC
+      CidrBlock:
+        !FindInMap ['SubnetConfig', 'PublicOne', 'CIDR']
+      AvailabilityZone:
+         Fn::Select:
+         - 0
+         - Fn::GetAZs: {Ref: 'AWS::Region'}
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppStackName} Public Subnet (AZ1)     
+        - Key: Project
+          Value: .Net Core on AWS           
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: ApiVPC
+      CidrBlock:
+        !FindInMap ['SubnetConfig', 'PublicTwo', 'CIDR']
+      AvailabilityZone:
+         Fn::Select:
+         - 1
+         - Fn::GetAZs: {Ref: 'AWS::Region'}
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppStackName} Public Subnet (AZ2)   
+        - Key: Project
+          Value: .Net Core on AWS             
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: ApiVPC
+      CidrBlock:
+        !FindInMap ['SubnetConfig', 'PrivateOne', 'CIDR']
+      AvailabilityZone:
+         Fn::Select:
+         - 0
+         - Fn::GetAZs: {Ref: 'AWS::Region'}
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppStackName} Private Subnet (AZ1)       
+        - Key: Project
+          Value: .Net Core on AWS            
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: ApiVPC
+      CidrBlock:
+        !FindInMap ['SubnetConfig', 'PrivateTwo', 'CIDR']
+      AvailabilityZone:
+         Fn::Select:
+         - 1
+         - Fn::GetAZs: {Ref: 'AWS::Region'}
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppStackName} Private Subnet (AZ2)       
+        - Key: Project
+          Value: .Net Core on AWS            
+  IGW:
+    DependsOn: ApiVPC
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppStackName} - Internet Gateway    
+        - Key: Project
+          Value: .Net Core on AWS             
+  VPCGatewayAttachment:
+    DependsOn: IGW
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: ApiVPC
+      InternetGatewayId:
+        Ref: IGW
+  NAT1EIP:
+    DependsOn: VPCGatewayAttachment
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  NAT2EIP:
+    DependsOn: VPCGatewayAttachment
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  NATGateway1:
+    DependsOn: VPCGatewayAttachment
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+        - NAT1EIP
+        - AllocationId
+      SubnetId:
+        Ref: PublicSubnet1
+  NATGateway2:
+    DependsOn: VPCGatewayAttachment
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+        - NAT2EIP
+        - AllocationId
+      SubnetId:
+        Ref: PublicSubnet2
+  PrivateSubnet1RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: ApiVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppStackName} Private Route     
+        - Key: Project
+          Value: .Net Core on AWS           
+  PrivateSubnet1Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref 'PrivateSubnet1RouteTable'
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: NATGateway1
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PrivateSubnet1
+      RouteTableId:
+        Ref: PrivateSubnet1RouteTable
+  PrivateSubnet2RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: ApiVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppStackName} Private Route   
+        - Key: Project
+          Value: .Net Core on AWS          
+  PrivateSubnet2Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: PrivateSubnet2RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: NATGateway2
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PrivateSubnet2
+      RouteTableId:
+        Ref: PrivateSubnet2RouteTable
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: ApiVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppStackName} Public Route        
+        - Key: Project
+          Value: .Net Core on AWS          
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: 
+        Ref: PublicSubnetRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: IGW
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnet1
+      RouteTableId:
+        Ref: PublicSubnetRouteTable
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnet2
+      RouteTableId:
+        Ref: PublicSubnetRouteTable
+  #ECS Cluster
+  ECSCluster:
+    DependsOn: ApiVPC
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${AppStackName}-ecs-cluster
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppStackName} ECS Cluster
+        - Key: Project
+          Value: .Net Core on AWS          
+  #ECS Task Definition
+  ECSTaskDefinition:
+    DependsOn: ApiVPC
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${AppStackName}
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole
+      TaskRoleArn: !Ref 'ECSRole'
+      Cpu: 256
+      Memory: 512
+      RequiresCompatibilities:
+        - FARGATE
+      ContainerDefinitions:
+        -
+          Name: web
+          LogConfiguration:
+            LogDriver:  awslogs
+            Options:
+              awslogs-group: !Ref 'ECSLogGroup'
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: !Sub ${AppStackName}-logs
+          Image: 
+            Fn::Join:
+              - ''
+              - - Ref: AWS::AccountId
+                - '.dkr.ecr.'
+                - Ref: AWS::Region
+                - '.amazonaws.com/'
+                - !Sub ${AppStackName}-todo-repository:latest  
+          Cpu: 256
+          Memory: 256
+          PortMappings:
+            - ContainerPort: 80
+              Protocol: tcp
+          Command:
+            - "dotnet"
+            - "todo-app.dll"                       
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub ${AppStackName}-awslogs
+      RetentionInDays: 30
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AppStackName}-ecs-app-sg
+      GroupDescription: Access to the Fargate containers
+      VpcId: !Ref 'ApiVPC'
+      SecurityGroupIngress:
+      # Allow access to ALB from anywhere on the internet
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+  EcsSecurityGroupIngressTCP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress TCP All Port from ELB SG
+      GroupId: !Ref 'ECSSecurityGroup'
+      IpProtocol: tcp
+      FromPort: 1
+      ToPort: 65535
+      SourceSecurityGroupId: !Ref 'PublicLoadBalancerSG'
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AppStackName}-ecs-db-sg
+      GroupDescription: Access to the RDS
+      VpcId: !Ref 'ApiVPC'
+
+  DBSecurityGroupIngressTCP:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn: DBSecurityGroup
+    Properties:
+      Description: Ingress 3306 
+      GroupId: !Ref 'DBSecurityGroup'
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref 'ECSSecurityGroup'
+
+  #ALB
+  PublicLoadBalancerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AppStackName}-elb-sg
+      GroupDescription: Access to the public facing load balancer
+      VpcId: !Ref 'ApiVPC'
+      SecurityGroupIngress:
+          - CidrIp: 0.0.0.0/0
+            IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      Name: !Sub ${AppStackName}-elb
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: '60'
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups: [!Ref 'PublicLoadBalancerSG']
+  
+  PublicLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - PublicLoadBalancer
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref 'TargetGroup'
+          Type: 'forward'
+      LoadBalancerArn: !Ref 'PublicLoadBalancer'
+      Port: 80
+      Protocol: HTTP
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: /api/values
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: ip
+      Name: !Sub ${AppStackName}-tgt-grp
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref 'ApiVPC'
+
+  LoadBalancerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref 'TargetGroup'
+          Type: 'forward'
+      Conditions:
+        - Field: path-pattern
+          Values: ['*']
+      ListenerArn: !Ref PublicLoadBalancerListener
+      Priority: 1 
+
+  
+  ECSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AppStackName}-ecs-role
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonRDSFullAccess 
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess 
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerServiceFullAccess
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role  
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs.amazonaws.com]
+          Action: ['sts:AssumeRole']
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']          
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'ec2:AttachNetworkInterface'
+              - 'ec2:CreateNetworkInterface'
+              - 'ec2:CreateNetworkInterfacePermission'
+              - 'ec2:DeleteNetworkInterface'
+              - 'ec2:DeleteNetworkInterfacePermission'
+              - 'ec2:Describe*'
+              - 'ec2:DetachNetworkInterface'
+              - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+              - 'elasticloadbalancing:DeregisterTargets'
+              - 'elasticloadbalancing:Describe*'
+              - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+              - 'elasticloadbalancing:RegisterTargets'
+            Resource: '*'
+  # ECS Task Role
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AppStackName}-taskexec-role
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: AmazonECSTaskExecutionRolePolicy
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                - 'ecr:GetAuthorizationToken'
+                - 'ecr:BatchCheckLayerAvailability'
+                - 'ecr:GetDownloadUrlForLayer'
+                - 'ecr:BatchGetImage'
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+              Resource: '*'
+  #Aurora SQL
+  RDSCluster:
+    Properties: 
+      DBClusterParameterGroupName: 
+        Ref: RDSDBClusterParameterGroup
+      Engine: aurora
+      EngineMode: serverless
+      MasterUserPassword: 
+        Ref: DBPassword
+      MasterUsername: 
+        Ref: DBUser
+      DBClusterIdentifier: !Sub ${AppStackName}
+      DatabaseName: 
+        Ref: DBName
+      DBSubnetGroupName: 
+        Ref: DBSubnetGroup    
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppStackName} Aurora Serverless Cluster   
+        - Key: Project
+          Value: .Net Core on AWS          
+      VpcSecurityGroupIds:
+        - Ref: DBSecurityGroup                 
+    Type: "AWS::RDS::DBCluster"
+    DependsOn: DBSubnetGroup
+  RDSDBClusterParameterGroup: 
+    Properties: 
+      Description: "CloudFormation Sample Aurora Cluster Parameter Group"
+      Family: aurora5.6
+      Parameters: 
+        time_zone: US/Eastern
+    Type: "AWS::RDS::DBClusterParameterGroup"    
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties: 
+      DBSubnetGroupDescription: RDS Subnet group for Aurora Serverless
+      DBSubnetGroupName: !Sub ${AppStackName}-aurora-subnet-group
+      SubnetIds: 
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppStackName} RDS Subnet Group
+        - Key: Project
+          Value: .Net Core on AWS          
+  #Code Commit
+  CodeCommitRepository:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Sub ${AppStackName}-todo-repo
+      RepositoryDescription: Respository to maintain code related to the Todo Api.
+  #Code Build
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AppStackName}-todo-app-build
+      Description: Todo Api application codebuild project.
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: no_artifacts
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:1.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+            - Name: REPOSITORY_URI
+              Type: PLAINTEXT
+              Value: 
+                Fn::Join:
+                  - ''
+                  - - Ref: AWS::AccountId
+                    - '.dkr.ecr.'
+                    - Ref: AWS::Region
+                    - '.amazonaws.com/'
+                    - !Sub ${AppStackName}-todo-repository  
+            - Name: AWS_DEFAULT_REGION
+              Type: PLAINTEXT
+              Value: 
+                Ref: AWS::Region        
+      Source:
+        BuildSpec: config/buildspec.yml
+        Location: 
+          Fn::Join:
+            - ''
+            - - 'https://git-codecommit.'
+              - Ref: AWS::Region
+              - '.amazonaws.com/v1/repos/'
+              - !Sub ${AppStackName}-todo-repo
+        Type: CODECOMMIT 
+      SourceVersion: refs/heads/master
+      TimeoutInMinutes: 10 
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess 
+      - arn:aws:iam::aws:policy/AWSCodeCommitFullAccess   
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal:
+            Service: [codebuild.amazonaws.com]
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                - 'logs:*'
+                - 'ec2:CreateNetworkInterface'
+                - 'ec2:DescribeNetworkInterfaces'
+                - 'ec2:DeleteNetworkInterface'
+                - 'ec2:DescribeSubnets'
+                - 'ec2:DescribeSecurityGroups'
+                - 'ec2:DescribeDhcpOptions'
+                - 'ec2:DescribeVpcs'
+                - 'ec2:CreateNetworkInterfacePermission'
+                Effect: Allow
+                Resource: '*'
+  #CodeDeploy
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ComputePlatform: ECS
+  #ECR
+  Repository: 
+    Type: AWS::ECR::Repository
+    Properties: 
+      RepositoryName: !Sub ${AppStackName}-todo-repository
+      RepositoryPolicyText: 
+        Version: "2012-10-17"
+        Statement: 
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: 'sts:AssumeRole' 
+  # CloudWatchEvents Code build Rold            
+  CloudWatchEventsCodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AppStackName}-cloud-watch-events-codebuild-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+      - PolicyName: aws-events-code-build
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'codebuild:StartBuild'
+            Resource: !GetAtt CodeBuildProject.Arn              
+  # CloudWatch Event Rule for codecommit build trigger
+  CloudWatchEventCodeBuildEventRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "This event rule triggers the build on code commit event"
+      EventPattern: 
+        source: 
+          - "aws.codecommit"
+        detail-type: 
+          - "CodeCommit Repository State Change"
+        detail: 
+          event: 
+            - "referenceCreated"
+            - "referenceUpdated"
+          referenceType: 
+            - "branch"
+          referenceName: 
+            - "master"                    
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn: {'Fn::GetAtt': [CodeBuildProject, Arn]}
+          Id: cloudwatch-codebuild-eventrules  
+          RoleArn: !GetAtt CloudWatchEventsCodeBuildRole.Arn
+  #S3 bucket for putting the published api folder.
+  CodeS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: 
+        !Sub ${AppStackName}-${AWS::Region}-${AWS::AccountId}
+  #Amazon Systems Manager
+  SystemsManagerBasicParameter:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/Database/Config/AuroraConnectionString"
+      Type: "String"
+      Value: !Join [ "",
+          [
+            "server=",
+            !Join [ "", [ !GetAtt RDSCluster.Endpoint.Address, "" ] ],
+            ";port=",
+            !GetAtt RDSCluster.Endpoint.Port,
+            ";database=", !Join [ "", [ Ref: DBName, "" ] ],
+            ";uid=", !Join [ "", [ Ref: DBUser, "" ] ],
+            ";password=", !Join [ "", [ Ref: DBPassword, "" ] ],
+            ";SSLMode=None"
+          ]
+        ]       
+      Description: "SSM Parameter for maintaining the Aurora DB connection string."
+      # AllowedPattern: "^[a-zA-Z]{1,10}$"
+      Tags:
+        "Environment": "DEV"  
+  SystemsManagerBasicDBNameParameter:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/Database/Config/DBName"
+      Type: "String"
+      Value: !Join [ "", [ Ref: DBName, "" ] ]
+      Description: "SSM Parameter for maintaining the Aurora DBName."
+      Tags:
+        "Environment": "DEV"    
+  SystemsManagerBasicDBUserParameter:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/Database/Config/DBUser"
+      Type: "String"
+      Value: !Join [ "", [ Ref: DBUser, "" ] ]
+      Description: "SSM Parameter for maintaining the Aurora DBUser."
+      Tags:
+        "Environment": "DEV"          
+  SystemsManagerBasicDBPasswordParameter:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/Database/Config/DBPassword"
+      Type: "String"
+      Value: !Join [ "", [ Ref: DBPassword, "" ] ]
+      Description: "SSM Parameter for maintaining the Aurora DBPassword."
+      Tags:
+        "Environment": "DEV"     
+  SystemsManagerBasicDBHostParameter:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: "/Database/Config/DBHost"
+      Type: "String"
+      Value: !Join [ "", [ !GetAtt RDSCluster.Endpoint.Address, "" ] ] 
+      Description: "SSM Parameter for maintaining the Aurora DB Host."
+      Tags:
+        "Environment": "DEV"                         
+Outputs:
+  CodeCommitRepositoryName:
+    Description: The name of the CodeCommit Repository
+    Value: !Ref 'CodeCommitRepository'
+  CodeBuildName:
+    Description: The name of the CodeBuild.
+    Value: !Ref 'CodeBuildProject'    
+  ClusterName:
+    Description: The name of the ECS cluster
+    Value: !Ref 'ECSCluster'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'ClusterName' ] ]
+  CodeS3BucketName:
+    Description: The name of the S3 Bucket which has code for mysql table creation scripts
+    Value: !Ref 'CodeS3Bucket'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'CodeS3Bucket' ] ]        
+  ExternalUrl:
+    Description: The url of the external load balancer
+    Value: !Join ['', ['http://', !GetAtt 'PublicLoadBalancer.DNSName']]
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'ExternalUrl' ] ]
+  VPCId:
+    Description: The ID of the VPC that this stack is deployed in
+    Value: !Ref 'ApiVPC'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'ApiVPC' ] ]
+  PublicSubnet1:
+    Description: Public subnet one
+    Value: !Ref 'PublicSubnet1'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'PublicSubnet1' ] ]
+  PublicSubnet2:
+    Description: Public subnet two
+    Value: !Ref 'PublicSubnet2'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'PublicSubnet2' ] ]
+  PrivateSubnet1:
+    Description: Private subnet one
+    Value: !Ref 'PrivateSubnet1'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'PrivateSubnet1' ] ]
+  PrivateSubnet2:
+    Description: Private subnet two
+    Value: !Ref 'PrivateSubnet2'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'PrivateSubnet2' ] ]
+  ECSRole:
+    Description: The ARN of the ECS role
+    Value: !GetAtt 'ECSRole.Arn'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'ECSRole' ] ]
+  ECSTaskExecutionRole:
+    Description: The ARN of the ECS role
+    Value: !GetAtt 'ECSTaskExecutionRole.Arn'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'ECSTaskExecutionRole' ] ]      
+  ECSTaskDefinition:
+    Description: TaskDefinition for the ECS Cluster
+    Value: !Ref 'ECSTaskDefinition'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'ECSTaskDefinition' ] ]
+  TargetGroupName:
+    Description: TargetGroup for the loadbalancer
+    Value: !Ref TargetGroup
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'TargetGroupName' ] ]
+  ECSSecurityGroup:
+    Description: ECSSecurityGroup for the loadbalancer
+    Value: !Ref 'ECSSecurityGroup'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'ECSSecurityGroup' ] ]
+  PublicListener:
+    Description: The ARN of the public load balancer's Listener
+    Value: !Ref PublicLoadBalancerListener
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'PublicListener' ] ]      
