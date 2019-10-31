@@ -1,5 +1,5 @@
 
-# Developing a Microsoft .NET Web API .NET Core application with Aurora Database using CloudFormation. 
+# Developing a Microsoft .NET Core Web API application with Aurora Database using CloudFormation. 
 
 **As part of this blog we will do the following.**
 
